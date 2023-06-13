@@ -2588,9 +2588,9 @@ VerilatedVirtualBase* VerilatedContext::threadPoolp() {
 }
 
 VerilatedVirtualBase* VerilatedContext::resetThreadPoolp() {
-  m_threadPool.release();
-  m_threadPool = std::make_unique<VlThreadPool>(this, m_threads - 1);
-  return m_threadPool.get();
+    m_threadPool.release();
+    m_threadPool = std::make_unique<VlThreadPool>(this, m_threads - 1);
+    return m_threadPool.get();
 }
 
 VerilatedVirtualBase*
