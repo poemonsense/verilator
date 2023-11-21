@@ -773,7 +773,7 @@ class GateInline final {
 
             // If the substitution is for a complex operation, avoid inline it.
             AstNodeExpr* const substp = okVisitor.substitutionp();
-            if (substp->instrCount() > 1) continue;
+            if (substp->instrCount() > 2) continue;
 
             // Does it read multiple source variables?
             if (okVisitor.readVscps().size() > 1) {
