@@ -771,6 +771,10 @@ class GateInline final {
             // Was it ok?
             if (!okVisitor.isSimple()) continue;
 
+            // If the substitution is for a complex operation, avoid inline it.
+            AstNodeExpr* const substp = okVisitor.substitutionp();
+            if (substp->instrCount() > 1) continue;
+
             // Does it read multiple source variables?
             if (okVisitor.readVscps().size() > 1) {
                 if (!allowMultiIn) {
@@ -792,7 +796,6 @@ class GateInline final {
             ++m_statInlined;
 
             AstVarScope* const vscp = vVtxp->varScp();
-            AstNodeExpr* const substp = okVisitor.substitutionp();
             if (debug() >= 9) {
                 vscp->dumpTree("substituting: ");
                 substp->dumpTree("        with: ");
