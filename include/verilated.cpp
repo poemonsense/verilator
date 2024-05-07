@@ -3128,280 +3128,288 @@ void Verilated::stackCheck(QData needSize) VL_MT_UNSAFE {
         if (haveSize == RLIM_INFINITY) haveSize = 0;
     }
     // VL_PRINTF_MT("-Info: stackCheck(%" PRIu64 ") have %" PRIu64 "\n", needSize, haveSize);
-    // Check for 1.5x need, but suggest 2x so small model increase won't cause warning
-    // if the user follows the suggestions
-    if (VL_UNLIKELY(haveSize && needSize && haveSize < (needSize + needSize / 2))) {
-        VL_PRINTF_MT("%%Warning: System has stack size %" PRIu64 " kb"
-                     " which may be too small; suggest 'ulimit -s %" PRIu64 "' or larger\n",
-                     haveSize / 1024, (needSize * 2) / 1024);
-    }
+    // Check and request for 1.5x need. This is automated so the user doesn't need to do anything.
+    QData requestSize = needSize + needSize / 2;
+    if (VL_UNLIKELY(haveSize && needSize && haveSize < requestSize)) {
+        // Try to increase the stack limit to the requested size
+        rlim.rlim_cur = requestSize;
+        if (setrlimit(RLIMIT_STACK, &rlim)) {
+            VL_PRINTF_MT("%%Warning: System has stack size %" PRIu64 " kb"
+                         " which may be too small; however, we fail to request more"
+                         " using 'ulimit -s %" PRIu64 "'\n",
+                         haveSize / 1024, requestSize);
+        }
 #else
     (void)needSize;  // Unused argument
 #endif
-}
+    }
 
-void Verilated::mkdir(const char* dirname) VL_MT_UNSAFE {
+    void Verilated::mkdir(const char* dirname) VL_MT_UNSAFE {
 #if defined(_WIN32) || defined(__MINGW32__)
-    ::mkdir(dirname);
+        ::mkdir(dirname);
 #else
     ::mkdir(dirname, 0777);
 #endif
-}
-
-void Verilated::quiesce() VL_MT_SAFE {
-    // Wait until all threads under this evaluation are quiet
-    // THREADED-TODO
-}
-
-int Verilated::exportFuncNum(const char* namep) VL_MT_SAFE {
-    return VerilatedImp::exportFind(namep);
-}
-
-void Verilated::endOfThreadMTaskGuts(VerilatedEvalMsgQueue* evalMsgQp) VL_MT_SAFE {
-    VL_DEBUG_IF(VL_DBG_MSGF("End of thread mtask\n"););
-    VerilatedThreadMsgQueue::flush(evalMsgQp);
-}
-
-void Verilated::endOfEval(VerilatedEvalMsgQueue* evalMsgQp) VL_MT_SAFE {
-    // It doesn't work to set endOfEvalReqd on the threadpool thread
-    // and then check it on the eval thread since it's thread local.
-    // It should be ok to call into endOfEvalGuts, it returns immediately
-    // if there are no transactions.
-    VL_DEBUG_IF(VL_DBG_MSGF("End-of-eval cleanup\n"););
-    VerilatedThreadMsgQueue::flush(evalMsgQp);
-    evalMsgQp->process();
-}
-
-//===========================================================================
-// VerilatedImp:: Methods
-
-void VerilatedImp::versionDump() VL_MT_SAFE {
-    VL_PRINTF_MT("  Version: %s %s\n", Verilated::productName(), Verilated::productVersion());
-}
-
-//===========================================================================
-// VerilatedModel:: Methods
-
-VerilatedModel::VerilatedModel(VerilatedContext& context)
-    : m_context{context} {}
-
-std::unique_ptr<VerilatedTraceConfig> VerilatedModel::traceConfig() const { return nullptr; }
-
-//===========================================================================
-// VerilatedModule:: Methods
-
-VerilatedModule::VerilatedModule(const char* namep)
-    : m_namep{strdup(namep)} {}
-
-VerilatedModule::~VerilatedModule() {
-    // Memory cleanup - not called during normal operation
-    // NOLINTNEXTLINE(google-readability-casting)
-    if (m_namep) VL_DO_CLEAR(free((void*)(m_namep)), m_namep = nullptr);
-}
-
-//======================================================================
-// VerilatedVar:: Methods
-
-// cppcheck-suppress unusedFunction  // Used by applications
-uint32_t VerilatedVarProps::entSize() const VL_MT_SAFE {
-    uint32_t size = 1;
-    switch (vltype()) {
-    case VLVT_PTR: size = sizeof(void*); break;
-    case VLVT_UINT8: size = sizeof(CData); break;
-    case VLVT_UINT16: size = sizeof(SData); break;
-    case VLVT_UINT32: size = sizeof(IData); break;
-    case VLVT_UINT64: size = sizeof(QData); break;
-    case VLVT_WDATA: size = VL_WORDS_I(packed().elements()) * sizeof(IData); break;
-    default: size = 0; break;  // LCOV_EXCL_LINE
     }
-    return size;
-}
 
-size_t VerilatedVarProps::totalSize() const {
-    size_t size = entSize();
-    for (int udim = 0; udim < udims(); ++udim) size *= m_unpacked[udim].elements();
-    return size;
-}
-
-void* VerilatedVarProps::datapAdjustIndex(void* datap, int dim, int indx) const VL_MT_SAFE {
-    if (VL_UNLIKELY(dim <= 0 || dim > udims())) return nullptr;
-    if (VL_UNLIKELY(indx < low(dim) || indx > high(dim))) return nullptr;
-    const int indxAdj = indx - low(dim);
-    uint8_t* bytep = reinterpret_cast<uint8_t*>(datap);
-    // If on index 1 of a 2 index array, then each index 1 is index2sz*entsz
-    size_t slicesz = entSize();
-    for (int d = dim + 1; d <= m_udims; ++d) slicesz *= elements(d);
-    bytep += indxAdj * slicesz;
-    return bytep;
-}
-
-//======================================================================
-// VerilatedScope:: Methods
-
-VerilatedScope::~VerilatedScope() {
-    // Memory cleanup - not called during normal operation
-    Verilated::threadContextp()->impp()->scopeErase(this);
-    if (m_namep) VL_DO_CLEAR(delete[] m_namep, m_namep = nullptr);
-    if (m_callbacksp) VL_DO_CLEAR(delete[] m_callbacksp, m_callbacksp = nullptr);
-    if (m_varsp) VL_DO_CLEAR(delete m_varsp, m_varsp = nullptr);
-    m_funcnumMax = 0;  // Force callback table to empty
-}
-
-void VerilatedScope::configure(VerilatedSyms* symsp, const char* prefixp, const char* suffixp,
-                               const char* identifier, int8_t timeunit,
-                               const Type& type) VL_MT_UNSAFE {
-    // Slowpath - called once/scope at construction
-    // We don't want the space and reference-count access overhead of strings.
-    m_symsp = symsp;
-    m_type = type;
-    m_timeunit = timeunit;
-    {
-        char* const namep = new char[std::strlen(prefixp) + std::strlen(suffixp) + 2];
-        char* dp = namep;
-        for (const char* sp = prefixp; *sp;) *dp++ = *sp++;
-        if (*prefixp && *suffixp) *dp++ = '.';
-        for (const char* sp = suffixp; *sp;) *dp++ = *sp++;
-        *dp++ = '\0';
-        m_namep = namep;
+    void Verilated::quiesce() VL_MT_SAFE {
+        // Wait until all threads under this evaluation are quiet
+        // THREADED-TODO
     }
-    m_identifierp = identifier;
-    Verilated::threadContextp()->impp()->scopeInsert(this);
-}
 
-void VerilatedScope::exportInsert(int finalize, const char* namep, void* cb) VL_MT_UNSAFE {
-    // Slowpath - called once/scope*export at construction
-    // Insert a exported function into scope table
-    const int funcnum = VerilatedImp::exportInsert(namep);
-    if (!finalize) {
-        // Need two passes so we know array size to create
-        // Alternative is to dynamically stretch the array, which is more code, and slower.
-        if (funcnum >= m_funcnumMax) m_funcnumMax = funcnum + 1;
-    } else {
-        if (VL_UNCOVERABLE(funcnum >= m_funcnumMax)) {
-            VL_FATAL_MT(__FILE__, __LINE__, "",  // LCOV_EXCL_LINE
-                        "Internal: Bad funcnum vs. pre-finalize maximum");
+    int Verilated::exportFuncNum(const char* namep) VL_MT_SAFE {
+        return VerilatedImp::exportFind(namep);
+    }
+
+    void Verilated::endOfThreadMTaskGuts(VerilatedEvalMsgQueue * evalMsgQp) VL_MT_SAFE {
+        VL_DEBUG_IF(VL_DBG_MSGF("End of thread mtask\n"););
+        VerilatedThreadMsgQueue::flush(evalMsgQp);
+    }
+
+    void Verilated::endOfEval(VerilatedEvalMsgQueue * evalMsgQp) VL_MT_SAFE {
+        // It doesn't work to set endOfEvalReqd on the threadpool thread
+        // and then check it on the eval thread since it's thread local.
+        // It should be ok to call into endOfEvalGuts, it returns immediately
+        // if there are no transactions.
+        VL_DEBUG_IF(VL_DBG_MSGF("End-of-eval cleanup\n"););
+        VerilatedThreadMsgQueue::flush(evalMsgQp);
+        evalMsgQp->process();
+    }
+
+    //===========================================================================
+    // VerilatedImp:: Methods
+
+    void VerilatedImp::versionDump() VL_MT_SAFE {
+        VL_PRINTF_MT("  Version: %s %s\n", Verilated::productName(), Verilated::productVersion());
+    }
+
+    //===========================================================================
+    // VerilatedModel:: Methods
+
+    VerilatedModel::VerilatedModel(VerilatedContext & context)
+        : m_context{context} {}
+
+    std::unique_ptr<VerilatedTraceConfig> VerilatedModel::traceConfig() const { return nullptr; }
+
+    //===========================================================================
+    // VerilatedModule:: Methods
+
+    VerilatedModule::VerilatedModule(const char* namep)
+        : m_namep{strdup(namep)} {}
+
+    VerilatedModule::~VerilatedModule() {
+        // Memory cleanup - not called during normal operation
+        // NOLINTNEXTLINE(google-readability-casting)
+        if (m_namep) VL_DO_CLEAR(free((void*)(m_namep)), m_namep = nullptr);
+    }
+
+    //======================================================================
+    // VerilatedVar:: Methods
+
+    // cppcheck-suppress unusedFunction  // Used by applications
+    uint32_t VerilatedVarProps::entSize() const VL_MT_SAFE {
+        uint32_t size = 1;
+        switch (vltype()) {
+        case VLVT_PTR: size = sizeof(void*); break;
+        case VLVT_UINT8: size = sizeof(CData); break;
+        case VLVT_UINT16: size = sizeof(SData); break;
+        case VLVT_UINT32: size = sizeof(IData); break;
+        case VLVT_UINT64: size = sizeof(QData); break;
+        case VLVT_WDATA: size = VL_WORDS_I(packed().elements()) * sizeof(IData); break;
+        default: size = 0; break;  // LCOV_EXCL_LINE
         }
-        if (VL_UNLIKELY(!m_callbacksp)) {  // First allocation
-            m_callbacksp = new void*[m_funcnumMax];
-            std::memset(m_callbacksp, 0, m_funcnumMax * sizeof(void*));
-        }
-        m_callbacksp[funcnum] = cb;
+        return size;
     }
-}
 
-void VerilatedScope::varInsert(int finalize, const char* namep, void* datap, bool isParam,
-                               VerilatedVarType vltype, int vlflags, int dims, ...) VL_MT_UNSAFE {
-    // Grab dimensions
-    // In the future we may just create a large table at emit time and
-    // statically construct from that.
-    if (!finalize) return;
+    size_t VerilatedVarProps::totalSize() const {
+        size_t size = entSize();
+        for (int udim = 0; udim < udims(); ++udim) size *= m_unpacked[udim].elements();
+        return size;
+    }
 
-    if (!m_varsp) m_varsp = new VerilatedVarNameMap;
-    VerilatedVar var(namep, datap, vltype, static_cast<VerilatedVarFlags>(vlflags), dims, isParam);
+    void* VerilatedVarProps::datapAdjustIndex(void* datap, int dim, int indx) const VL_MT_SAFE {
+        if (VL_UNLIKELY(dim <= 0 || dim > udims())) return nullptr;
+        if (VL_UNLIKELY(indx < low(dim) || indx > high(dim))) return nullptr;
+        const int indxAdj = indx - low(dim);
+        uint8_t* bytep = reinterpret_cast<uint8_t*>(datap);
+        // If on index 1 of a 2 index array, then each index 1 is index2sz*entsz
+        size_t slicesz = entSize();
+        for (int d = dim + 1; d <= m_udims; ++d) slicesz *= elements(d);
+        bytep += indxAdj * slicesz;
+        return bytep;
+    }
 
-    va_list ap;
-    va_start(ap, dims);
-    for (int i = 0; i < dims; ++i) {
-        const int msb = va_arg(ap, int);
-        const int lsb = va_arg(ap, int);
-        if (i == 0) {
-            var.m_packed.m_left = msb;
-            var.m_packed.m_right = lsb;
-        } else if (i >= 1 && i <= var.udims()) {
-            var.m_unpacked[i - 1].m_left = msb;
-            var.m_unpacked[i - 1].m_right = lsb;
+    //======================================================================
+    // VerilatedScope:: Methods
+
+    VerilatedScope::~VerilatedScope() {
+        // Memory cleanup - not called during normal operation
+        Verilated::threadContextp()->impp()->scopeErase(this);
+        if (m_namep) VL_DO_CLEAR(delete[] m_namep, m_namep = nullptr);
+        if (m_callbacksp) VL_DO_CLEAR(delete[] m_callbacksp, m_callbacksp = nullptr);
+        if (m_varsp) VL_DO_CLEAR(delete m_varsp, m_varsp = nullptr);
+        m_funcnumMax = 0;  // Force callback table to empty
+    }
+
+    void VerilatedScope::configure(VerilatedSyms * symsp, const char* prefixp, const char* suffixp,
+                                   const char* identifier, int8_t timeunit, const Type& type)
+        VL_MT_UNSAFE {
+        // Slowpath - called once/scope at construction
+        // We don't want the space and reference-count access overhead of strings.
+        m_symsp = symsp;
+        m_type = type;
+        m_timeunit = timeunit;
+        {
+            char* const namep = new char[std::strlen(prefixp) + std::strlen(suffixp) + 2];
+            char* dp = namep;
+            for (const char* sp = prefixp; *sp;) *dp++ = *sp++;
+            if (*prefixp && *suffixp) *dp++ = '.';
+            for (const char* sp = suffixp; *sp;) *dp++ = *sp++;
+            *dp++ = '\0';
+            m_namep = namep;
+        }
+        m_identifierp = identifier;
+        Verilated::threadContextp()->impp()->scopeInsert(this);
+    }
+
+    void VerilatedScope::exportInsert(int finalize, const char* namep, void* cb) VL_MT_UNSAFE {
+        // Slowpath - called once/scope*export at construction
+        // Insert a exported function into scope table
+        const int funcnum = VerilatedImp::exportInsert(namep);
+        if (!finalize) {
+            // Need two passes so we know array size to create
+            // Alternative is to dynamically stretch the array, which is more code, and slower.
+            if (funcnum >= m_funcnumMax) m_funcnumMax = funcnum + 1;
         } else {
-            // We could have a linked list of ranges, but really this whole thing needs
-            // to be generalized to support structs and unions, etc.
-            const std::string msg = "Unsupported multi-dimensional public varInsert: "s + namep;
-            VL_FATAL_MT(__FILE__, __LINE__, "", msg.c_str());
+            if (VL_UNCOVERABLE(funcnum >= m_funcnumMax)) {
+                VL_FATAL_MT(__FILE__, __LINE__, "",  // LCOV_EXCL_LINE
+                            "Internal: Bad funcnum vs. pre-finalize maximum");
+            }
+            if (VL_UNLIKELY(!m_callbacksp)) {  // First allocation
+                m_callbacksp = new void*[m_funcnumMax];
+                std::memset(m_callbacksp, 0, m_funcnumMax * sizeof(void*));
+            }
+            m_callbacksp[funcnum] = cb;
         }
     }
-    va_end(ap);
 
-    m_varsp->emplace(namep, var);
-}
+    void VerilatedScope::varInsert(int finalize, const char* namep, void* datap, bool isParam,
+                                   VerilatedVarType vltype, int vlflags, int dims, ...)
+        VL_MT_UNSAFE {
+        // Grab dimensions
+        // In the future we may just create a large table at emit time and
+        // statically construct from that.
+        if (!finalize) return;
 
-// cppcheck-suppress unusedFunction  // Used by applications
-VerilatedVar* VerilatedScope::varFind(const char* namep) const VL_MT_SAFE_POSTINIT {
-    if (VL_LIKELY(m_varsp)) {
-        const auto it = m_varsp->find(namep);
-        if (VL_LIKELY(it != m_varsp->end())) return &(it->second);
+        if (!m_varsp) m_varsp = new VerilatedVarNameMap;
+        VerilatedVar var(namep, datap, vltype, static_cast<VerilatedVarFlags>(vlflags), dims,
+                         isParam);
+
+        va_list ap;
+        va_start(ap, dims);
+        for (int i = 0; i < dims; ++i) {
+            const int msb = va_arg(ap, int);
+            const int lsb = va_arg(ap, int);
+            if (i == 0) {
+                var.m_packed.m_left = msb;
+                var.m_packed.m_right = lsb;
+            } else if (i >= 1 && i <= var.udims()) {
+                var.m_unpacked[i - 1].m_left = msb;
+                var.m_unpacked[i - 1].m_right = lsb;
+            } else {
+                // We could have a linked list of ranges, but really this whole thing needs
+                // to be generalized to support structs and unions, etc.
+                const std::string msg
+                    = "Unsupported multi-dimensional public varInsert: "s + namep;
+                VL_FATAL_MT(__FILE__, __LINE__, "", msg.c_str());
+            }
+        }
+        va_end(ap);
+
+        m_varsp->emplace(namep, var);
     }
-    return nullptr;
-}
 
-void* VerilatedScope::exportFindNullError(int funcnum) VL_MT_SAFE {
-    // Slowpath - Called only when find has failed
-    const std::string msg = ("Testbench C called '"s + VerilatedImp::exportName(funcnum)
-                             + "' but scope wasn't set, perhaps due to dpi import call without "
-                             + "'context', or missing svSetScope. See IEEE 1800-2023 35.5.3.");
-    VL_FATAL_MT("unknown", 0, "", msg.c_str());
-    return nullptr;
-}
+    // cppcheck-suppress unusedFunction  // Used by applications
+    VerilatedVar* VerilatedScope::varFind(const char* namep) const VL_MT_SAFE_POSTINIT {
+        if (VL_LIKELY(m_varsp)) {
+            const auto it = m_varsp->find(namep);
+            if (VL_LIKELY(it != m_varsp->end())) return &(it->second);
+        }
+        return nullptr;
+    }
 
-void* VerilatedScope::exportFindError(int funcnum) const VL_MT_SAFE {
-    // Slowpath - Called only when find has failed
-    const std::string msg
-        = ("Testbench C called '"s + VerilatedImp::exportName(funcnum)
-           + "' but this DPI export function exists only in other scopes, not scope '" + name()
-           + "'");
-    VL_FATAL_MT("unknown", 0, "", msg.c_str());
-    return nullptr;
-}
+    void* VerilatedScope::exportFindNullError(int funcnum) VL_MT_SAFE {
+        // Slowpath - Called only when find has failed
+        const std::string msg
+            = ("Testbench C called '"s + VerilatedImp::exportName(funcnum)
+               + "' but scope wasn't set, perhaps due to dpi import call without "
+               + "'context', or missing svSetScope. See IEEE 1800-2023 35.5.3.");
+        VL_FATAL_MT("unknown", 0, "", msg.c_str());
+        return nullptr;
+    }
 
-void VerilatedScope::scopeDump() const {
-    VL_PRINTF_MT("    SCOPE %p: %s\n", this, name());
-    for (int i = 0; i < m_funcnumMax; ++i) {
-        if (m_callbacksp && m_callbacksp[i]) {
-            VL_PRINTF_MT("       DPI-EXPORT %p: %s\n", m_callbacksp[i],
-                         VerilatedImp::exportName(i));
+    void* VerilatedScope::exportFindError(int funcnum) const VL_MT_SAFE {
+        // Slowpath - Called only when find has failed
+        const std::string msg
+            = ("Testbench C called '"s + VerilatedImp::exportName(funcnum)
+               + "' but this DPI export function exists only in other scopes, not scope '" + name()
+               + "'");
+        VL_FATAL_MT("unknown", 0, "", msg.c_str());
+        return nullptr;
+    }
+
+    void VerilatedScope::scopeDump() const {
+        VL_PRINTF_MT("    SCOPE %p: %s\n", this, name());
+        for (int i = 0; i < m_funcnumMax; ++i) {
+            if (m_callbacksp && m_callbacksp[i]) {
+                VL_PRINTF_MT("       DPI-EXPORT %p: %s\n", m_callbacksp[i],
+                             VerilatedImp::exportName(i));
+            }
+        }
+        if (const VerilatedVarNameMap* const varsp = this->varsp()) {
+            for (const auto& i : *varsp) VL_PRINTF_MT("       VAR %p: %s\n", &(i.second), i.first);
         }
     }
-    if (const VerilatedVarNameMap* const varsp = this->varsp()) {
-        for (const auto& i : *varsp) VL_PRINTF_MT("       VAR %p: %s\n", &(i.second), i.first);
+
+    void VerilatedHierarchy::add(VerilatedScope * fromp, VerilatedScope * top) {
+        VerilatedImp::hierarchyAdd(fromp, top);
     }
-}
 
-void VerilatedHierarchy::add(VerilatedScope* fromp, VerilatedScope* top) {
-    VerilatedImp::hierarchyAdd(fromp, top);
-}
+    void VerilatedHierarchy::remove(VerilatedScope * fromp, VerilatedScope * top) {
+        VerilatedImp::hierarchyRemove(fromp, top);
+    }
 
-void VerilatedHierarchy::remove(VerilatedScope* fromp, VerilatedScope* top) {
-    VerilatedImp::hierarchyRemove(fromp, top);
-}
-
-//===========================================================================
-// VerilatedOneThreaded:: Methods
+    //===========================================================================
+    // VerilatedOneThreaded:: Methods
 
 #ifdef VL_DEBUG
-void VerilatedAssertOneThread::fatal_different() VL_MT_SAFE {
-    VL_FATAL_MT(__FILE__, __LINE__, "",
-                "Routine called that is single threaded, but called from"
-                " a different thread then the expected constructing thread");
-}
+    void VerilatedAssertOneThread::fatal_different() VL_MT_SAFE {
+        VL_FATAL_MT(__FILE__, __LINE__, "",
+                    "Routine called that is single threaded, but called from"
+                    " a different thread then the expected constructing thread");
+    }
 #endif
 
-//===========================================================================
-// VlDeleter:: Methods
+    //===========================================================================
+    // VlDeleter:: Methods
 
-void VlDeleter::deleteAll() VL_EXCLUDES(m_mutex) VL_EXCLUDES(m_deleteMutex) VL_MT_SAFE {
-    while (true) {
-        {
-            VerilatedLockGuard lock{m_mutex};
-            if (m_newGarbage.empty()) break;
-            m_deleteMutex.lock();
-            std::swap(m_newGarbage, m_deleteNow);
-            // m_mutex is unlocked here, so destructors can enqueue new objects
+    void VlDeleter::deleteAll() VL_EXCLUDES(m_mutex) VL_EXCLUDES(m_deleteMutex) VL_MT_SAFE {
+        while (true) {
+            {
+                VerilatedLockGuard lock{m_mutex};
+                if (m_newGarbage.empty()) break;
+                m_deleteMutex.lock();
+                std::swap(m_newGarbage, m_deleteNow);
+                // m_mutex is unlocked here, so destructors can enqueue new objects
+            }
+            for (VlDeletable* const objp : m_deleteNow) delete objp;
+            m_deleteNow.clear();
+            m_deleteMutex.unlock();
         }
-        for (VlDeletable* const objp : m_deleteNow) delete objp;
-        m_deleteNow.clear();
-        m_deleteMutex.unlock();
     }
-}
 
-//===========================================================================
-// OS functions (last, so we have minimal OS dependencies above)
+    //===========================================================================
+    // OS functions (last, so we have minimal OS dependencies above)
 
 #define VL_ALLOW_VERILATEDOS_C
 #include "verilatedos_c.h"
